@@ -1,0 +1,184 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Ticket Events Stream and Reconcile service'
+Parameters:
+  DeliveryBucketName:
+    Type: String
+    Default: ticket-events-batch
+Resources:
+  DeliveryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': !Ref 'AWS::AccountId'
+  DeliveryGlueDB:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref 'AWS::AccountId'
+      DatabaseInput:
+        Name: mymovie
+  DeliveryGlueTable:
+    Type: AWS::Glue::Table
+    DependsOn: DeliveryGlueDB
+    Properties:
+      CatalogId: !Ref 'AWS::AccountId'
+      DatabaseName: mymovie
+      TableInput:
+        Name: ticket_event
+        StorageDescriptor:
+          Columns:
+            - Name: reservation_id
+              Type: string
+            - Name: time
+              Type: date
+            - Name: event_type
+              Type: string
+
+  DeliveryPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: firehose_delivery_policy
+      Roles:
+        - !Ref DeliveryRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:AbortMultipartUpload'
+              - 's3:GetBucketLocation'
+              - 's3:GetObject'
+              - 's3:ListBucket'
+              - 's3:ListBucketMultipartUploads'
+              - 's3:PutObject'
+            Resource:
+              - !Sub 'arn:aws:s3:::${DeliveryBucketName}'
+              - !Sub 'arn:aws:s3:::${DeliveryBucketName}*'
+          - Effect: Allow
+            Action:
+              - kinesis:DescribeStream
+              - kinesis:GetShardIterator
+              - kinesis:GetRecords
+            Resource: !GetAtt TicketEventsStream.Arn
+          - Effect: Allow
+            Action:
+              - glue:GetTable
+              - glue:GetTableVersion
+              - glue:GetTableVersions
+            Resource:
+              - !Sub 'arn:aws:glue:eu-west-1:${AWS::AccountId}:catalog'
+              - !Sub 'arn:aws:glue:eu-west-1:${AWS::AccountId}:database/mymovie'
+              - !Sub 'arn:aws:glue:eu-west-1:${AWS::AccountId}:table/mymovie/ticket_event'
+  TicketEventsStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: ticket-events-stream
+      RetentionPeriodHours: 24
+      ShardCount: 1
+  TicketEventsStreamFirehose:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    DependsOn:
+      - TicketEventsStream
+      - S3DeliveryBucket
+      - DeliveryRole
+      - DeliveryPolicy
+      - DeliveryGlueTable
+    Properties:
+      DeliveryStreamName: ticket-events-delivery-stream
+      DeliveryStreamType: KinesisStreamAsSource
+      KinesisStreamSourceConfiguration:
+        KinesisStreamARN: !GetAtt TicketEventsStream.Arn
+        RoleARN: !GetAtt DeliveryRole.Arn
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !GetAtt S3DeliveryBucket.Arn
+        BufferingHints:
+          IntervalInSeconds: 300
+          SizeInMBs: 64
+        DataFormatConversionConfiguration:
+          InputFormatConfiguration:
+            Deserializer:
+              OpenXJsonSerDe:
+                CaseInsensitive: True
+          OutputFormatConfiguration:
+            Serializer:
+              ParquetSerDe:
+                BlockSizeBytes: 256000000
+                Compression:  UNCOMPRESSED
+                MaxPaddingBytes: 0
+          SchemaConfiguration:
+            DatabaseName: mymovie
+            Region: !Sub ${AWS::Region}
+            RoleARN: !GetAtt DeliveryRole.Arn
+            TableName: !Ref DeliveryGlueTable
+        RoleARN: !GetAtt DeliveryRole.Arn
+  S3DeliveryBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref DeliveryBucketName
+      NotificationConfiguration:
+        TopicConfigurations:
+          - Topic: !Ref SNSTopic
+            Event: s3:ObjectCreated:Put
+    DependsOn:
+      - SNSTopic
+      - SNSTopicPolicy
+  DeliveryNotificationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: delivery-notification-q
+      MessageRetentionPeriod: 86400
+      VisibilityTimeout: 300
+#  NotificationQueuePolicy:
+#    Type: AWS::SQS::QueuePolicy
+#    Properties:
+#      PolicyDocument:
+#        Version: 2012-10-17
+#        Statement:
+#          - Effect: Allow
+#            Action: SQS:SendMessage
+#            Resource: !GetAtt  DeliveryNotificationQueue.Arn
+#      Queues:
+#        - !Ref DeliveryNotificationQueue
+#    DependsOn: DeliveryNotificationQueue
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    DependsOn:
+      - DeliveryNotificationQueue
+    Properties:
+      TopicName: reconcile-delivery-notification
+      Subscription:
+        - Endpoint: !GetAtt DeliveryNotificationQueue.Arn
+          Protocol: sqs
+  SNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: notification_topic_policy
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Statement-id
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: sns:Publish
+            Resource: !Ref SNSTopic
+            Condition:
+              ArnLike:
+                aws:SourceArn:
+                  Fn::Join:
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref DeliveryBucketName
+      Topics:
+        - Ref: SNSTopic
+
+
