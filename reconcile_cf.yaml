@@ -137,18 +137,33 @@ Resources:
       QueueName: delivery-notification-q
       MessageRetentionPeriod: 86400
       VisibilityTimeout: 300
-#  NotificationQueuePolicy:
-#    Type: AWS::SQS::QueuePolicy
-#    Properties:
-#      PolicyDocument:
-#        Version: 2012-10-17
-#        Statement:
-#          - Effect: Allow
-#            Action: SQS:SendMessage
-#            Resource: !GetAtt  DeliveryNotificationQueue.Arn
-#      Queues:
-#        - !Ref DeliveryNotificationQueue
-#    DependsOn: DeliveryNotificationQueue
+  NotificationQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Id: SQSPolicy
+        Statement:
+          - Sid: Allow-SNS-SendMessage
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - SQS:SendMessage
+            Resource: !GetAtt DeliveryNotificationQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn:
+                   Fn::Join:
+                     - ':'
+                     -  - 'arn:aws:sns'
+                        - Ref: AWS::Region
+                        - Ref: AWS::AccountId
+                        - 'reconcile-delivery-notification'
+      Queues:
+        - !Ref DeliveryNotificationQueue
+    DependsOn:
+      - DeliveryNotificationQueue
+      - SNSTopic
   SNSTopic:
     Type: AWS::SNS::Topic
     DependsOn:
